@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# This file is part of ZBackup.  ZBackup is free software: you can
+# redistribute it and/or modify it under the terms of the GNU General Public
+# License as published by the Free Software Foundation, version 2.
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+# FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+# details.
+#
+# You should have received a copy of the GNU General Public License along with
+# this program; if not, write to the Free Software Foundation, Inc., 51
+# Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+#
+# Copyright 2018 Johan Zaxmy <johan@zaxmy.com>
+__author__ = "Johan Zaxmy"
+__copyright__ = "Copyright 2018, Johan Zaxmy"
+__credits__ = ["Johan Zaxmy"]
+__license__ = "GPL"
+__version__ = "1.0.0"
+__maintainer__ = "Johan Zaxmy"
+__email__ = "johan@zaxmy.com"
+__status__ = "Production"
+
+PROG_NAME="ZBackup"
+ZFS="/sbin/zfs"
+ZPOOL="/sbin/zpool"
+SSH="/usr/bin/ssh"
+USER="root"
+HOST="backup1"
+DEBUG=True
+
+import subprocess
+import base64
+import re
+import datetime
+import argparse
+
+      
+
+def run(command):
+   if DEBUG == True:
+      print(command)
+   try: 
+      result = subprocess.check_output(command, shell=True, stderr=subprocess.STDOUT).decode('utf-8')
+   except subprocess.CalledProcessError as e:
+      result = e.output.decode('utf-8')
+   result = result.replace("\r","")
+   lines = result.split("\n")
+   no_blanks = filter(lambda x: not re.match(r'^\s*$',x), lines)
+   return(no_blanks)
+
+def runOverSSH(host,user,command):
+   b = bytearray()
+   b.extend(map(ord,command))
+   c = base64.b64encode(b).decode('utf-8')
+   return run(SSH+' -tt -q '+USER+"@"+host + " 'echo "+c+" | base64 -d | bash'")
+  
+
+
+def server(cmd):
+   return(run(cmd))
+
+def backup(cmd):
+   return(runOverSSH(HOST,USER,cmd))
+
+
+def getSnapshots(fileSystem,machine):
+   snaps= []   # creation time is timestamp when using -p option to zfs 
+   cmd = ZFS + " list -t snapshot -o name,creation -H -p -s creation " 
+   out = machine(cmd)
+   out = filter(lambda x: re.match(r'^' + fileSystem + '@.+',x), out)
+   for l in out:
+      snaps.append(l.split("\t"))
+   return(snaps)
+
+def getLatestCommon(src,dst):
+   src.reverse()
+   dst.reverse()
+   for d in dst:
+      for s in src:
+#         print("Src: ["+" ".join(s)+"]\nDst: ["+" ".join(d)+"]")
+         if s==d:
+            return(s)
+   return(None)
+      
+def debugPrintLines(lines):
+   if DEBUG == True:
+      for l in lines:
+         print(l)
+
+def destroyFilesystem(machine,fileSystem):
+   cmd = "%(ZFS)s destroy -r %(fileSystem)s" % {'ZFS':ZFS,'fileSystem':fileSystem}
+   if machine == server:
+      print("Tried to destroy local filesystem [%s]" % fileSystem)
+      exit()
+   debugPrintLines(machine(cmd))
+   
+def createSnapshot(machine,snapName):
+   cmd = "%(ZFS)s snapshot %(snapName)s" % {'ZFS':ZFS,'snapName':snapName}
+   debugPrintLines(machine(cmd))
+
+def destroySnapshot(machine,snapName):
+   if not re.match(r'^.*@.*$',snapName):
+      print("Snapname doesn't include @ [%s]"%snapName)
+      exit() 
+   cmd = "%(ZFS)s destroy %(snapName)s" % {'ZFS':ZFS,'snapName':snapName}
+   debugPrintLines(machine(cmd))
+
+def sendFull(snapName,fileSystem):
+   cmd = "%(ZFS)s send %(snapName)s | ssh %(USER)s@%(HOST)s '%(ZFS)s receive -F %(fileSystem)s'" %\
+      { 'ZFS':ZFS,'fileSystem':fileSystem,'USER':USER,'HOST':HOST,'snapName':snapName }
+   debugPrintLines(server(cmd))
+
+def sendDelta(fromSnap,toSnap,fileSystem):
+   # Send incremental
+   cmd = "%(ZFS)s send -i %(fromSnap)s %(toSnap)s | ssh %(USER)s@%(HOST)s '%(ZFS)s receive -F %(fileSystem)s'" %\
+      { 'ZFS':ZFS,'fileSystem':fileSystem,'USER':USER,'HOST':HOST,'fromSnap':fromSnap,'toSnap':toSnap }
+   debugPrintLines(server(cmd))
+ 
+ 
+
+backupPrefix="ZBackup"
+
+p = argparse.ArgumentParser(prog=PROG_NAME)
+p_s = p.add_argument_group('Server side options')
+p_s.add_argument('-f','--filesystem',help='Filesystem to backup, multiple possible',required=True,dest='fileSystem',action='append')
+p_b = p.add_argument_group('Backup server options')
+p_b.add_argument('-b','--backup-server',help='Server to send backups to',required=True,dest='backupHost')
+p_b.add_argument('-u','--user',help='Remote user',dest='backupUser',default='root')
+p_o = p.add_argument_group('Other')
+p_o.add_argument('-s','--ssh',help='Absolute path to SSH binary',dest='SSH',default='/usr/bin/ssh')
+p_o.add_argument('-z','--zfs',help='Absolute path to zfs binary',dest='ZFS',default='/sbin/zfs')
+p_o.add_argument('-p','--zpool',help='Absolute path to zpool binary',dest='ZPOOL',default='/sbin/zpool')
+p_o.add_argument('-d','--debug',help='Turns on debugging',dest='DEBUG',action='store_true')
+p_o.add_argument('--version', action='version', version='%(prog)s '+ __version__)
+args=p.parse_args()
+
+DEBUG=args.DEBUG
+HOST=args.backupHost
+USER=args.backupUser
+SSH=args.SSH
+ZFS=args.ZFS
+ZPOOL=args.ZPOOL
+
+for fileSystem in args.fileSystem:
+
+   s=getSnapshots(fileSystem,server)
+   b=getSnapshots(fileSystem,backup)
+   c=getLatestCommon(s,b)
+
+   weekDay = datetime.date.today().strftime('%a')
+   snapName = fileSystem+"@"+backupPrefix + "-daily-"+weekDay
+
+   if DEBUG:
+      print("Local snapshots:")
+      debugPrintLines(s)
+      print("Remote snapshots:")
+      debugPrintLines(b)
+      print("Common snapshot:")
+      print(c)
+
+   if c == None:
+     # No common past
+     # Resend everything, recreate local snapshot 
+      if snapName in [row[0] for row in s]:
+         destroySnapshot(server,snapName)
+      createSnapshot(server,snapName)
+      destroyFilesystem(backup,fileSystem)
+      sendFull(snapName,fileSystem)
+   else:
+      commonName = c[0]
+      commonDate = datetime.datetime.fromtimestamp(int(c[1])).date()
+      # Are our common dominator todays snapShot name?
+      if commonName == snapName:
+         # Scenarios, we allready runned backup today (timestamp should be same date)
+         if commonDate == datetime.date.today():
+            print("Remote backup from today exists, wont do anything");
+         # We have failed for a long time....
+         else:
+            print("Backup has failed for %d days, resending everything" %  (datetime.date.today()-commonDate).days)
+            destroyFilesystem(backup,fileSystem)
+            sendFull(snapName,fileSystem)
+      else:
+         # Delete current snapshot if exists
+         if snapName in [row[0] for row in s]:
+            destroySnapshot(server,snapName)
+         # Create new snapshot
+         createSnapshot(server,snapName)
+         # Send incremental
+         sendDelta(commonName,snapName,fileSystem)
+      
