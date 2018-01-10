@@ -52,6 +52,8 @@ def run(command):
    return(no_blanks)
 
 def runOverSSH(host,user,command):
+   if DEBUG == True:
+      print("SSH(%s)" % command)
    b = bytearray()
    b.extend(map(ord,command))
    c = base64.b64encode(b).decode('utf-8')
@@ -65,6 +67,13 @@ def server(cmd):
 def backup(cmd):
    return(runOverSSH(HOST,USER,cmd))
 
+def verifyPoolStatus(machine,fileSystem):
+   cmd = ZPOOL + " status " + fileSystem.split("/")[0]
+   out = machine(cmd)
+   status = "".join(filter(lambda x: re.match(r"^\s*state:.*$",x), out))
+   if re.match(r"^.*\s+ONLINE\s*$",status):
+      return(True)
+   return(False)
 
 def getSnapshots(fileSystem,machine):
    snaps= []   # creation time is timestamp when using -p option to zfs 
@@ -145,7 +154,13 @@ ZFS=args.ZFS
 ZPOOL=args.ZPOOL
 
 for fileSystem in args.fileSystem:
-
+   if not verifyPoolStatus(server,fileSystem):
+      print("Local zpool of filesystem %s is not ONLINE" % fileSystem)
+      continue
+   if not verifyPoolStatus(backup,fileSystem):
+      print("Backup destination zpool of filesystem %s is not ONLINE" % fileSystem)
+      continue
+ 
    s=getSnapshots(fileSystem,server)
    b=getSnapshots(fileSystem,backup)
    c=getLatestCommon(s,b)
