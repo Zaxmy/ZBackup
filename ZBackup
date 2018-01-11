@@ -36,6 +36,7 @@ import base64
 import re
 import datetime
 import argparse
+import os
 
       
 
@@ -48,7 +49,7 @@ def run(command):
       result = e.output.decode('utf-8')
    result = result.replace("\r","")
    lines = result.split("\n")
-   no_blanks = filter(lambda x: not re.match(r'^\s*$',x), lines)
+   no_blanks = [l for l in lines if not re.match(r'^\s*$',l)]
    return(no_blanks)
 
 def runOverSSH(host,user,command):
@@ -67,10 +68,14 @@ def server(cmd):
 def backup(cmd):
    return(runOverSSH(HOST,USER,cmd))
 
+def hostIsUp(host):
+   out=runOverSSH(HOST,USER,"uptime") 
+   return(re.match(r".*up\s.*\sload\saverage.*","".join(out)))
+
 def verifyPoolStatus(machine,fileSystem):
    cmd = ZPOOL + " status " + fileSystem.split("/")[0]
    out = machine(cmd)
-   status = "".join(filter(lambda x: re.match(r"^\s*state:.*$",x), out))
+   status = "".join([x for x in out if re.match(r"^\s*state:.*$",x)])
    if re.match(r"^.*\s+ONLINE\s*$",status):
       return(True)
    return(False)
@@ -79,7 +84,7 @@ def getSnapshots(fileSystem,machine):
    snaps= []   # creation time is timestamp when using -p option to zfs 
    cmd = ZFS + " list -t snapshot -o name,creation -H -p -s creation " 
    out = machine(cmd)
-   out = filter(lambda x: re.match(r'^' + fileSystem + '@.+',x), out)
+   out = [x for x in out if re.match(r'^' + fileSystem + '@.+',x) ]
    for l in out:
       snaps.append(l.split("\t"))
    return(snaps)
@@ -152,6 +157,10 @@ USER=args.backupUser
 SSH=args.SSH
 ZFS=args.ZFS
 ZPOOL=args.ZPOOL
+
+if not hostIsUp(HOST):
+   print("Backup server %s is not answearing, is it up?" %(HOST))
+   exit()
 
 for fileSystem in args.fileSystem:
    if not verifyPoolStatus(server,fileSystem):
